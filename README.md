@@ -130,7 +130,7 @@ Daniel SQL AI is built for everyone who believes data should be a conversation, 
 
 <div align="center">
 
-Built with ❤️ by [Daniel.pk](https://github.com/Daniel-pk)
+Built with ❤️ by [Daniel](https://github.com/daniellopez882/)
 
 **Transforming raw data into actionable intelligence.**
 
