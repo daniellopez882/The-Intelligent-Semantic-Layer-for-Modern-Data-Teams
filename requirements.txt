@@ -1,0 +1,13 @@
+langchain
+langchain-anthropic
+langchain-openai
+openai
+langchain-community
+sqlalchemy
+pandas
+plotly
+streamlit
+python-dotenv
+duckdb
+pydantic
+psycopg2-binary
