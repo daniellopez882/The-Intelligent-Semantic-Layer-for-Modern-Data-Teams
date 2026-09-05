@@ -1,137 +1,164 @@
-<div align="center">
+# SQL Agent
 
-# 💎 Daniel SQL AI
-### The Intelligent Semantic Layer for Modern Data Teams
+[![CI](https://github.com/daniellopez882/The-Intelligent-Semantic-Layer-for-Modern-Data-Teams/actions/workflows/ci.yml/badge.svg)](https://github.com/daniellopez882/The-Intelligent-Semantic-Layer-for-Modern-Data-Teams/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-<br/>
+Ask a database questions in plain language. A small tool-calling agent
+inspects the schema, writes **one read-only SELECT**, runs it on a connection
+that **cannot write**, and answers from the rows it got back. A Streamlit page
+shows the answer, the rows, a chart and every step the agent took.
 
-[![DeepSeek V3](https://img.shields.io/badge/LLM-DeepSeek_V3-6366F1?style=for-the-badge)](https://deepseek.com)
-[![LangChain](https://img.shields.io/badge/Agent-LangChain-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://langchain.com)
-[![Streamlit](https://img.shields.io/badge/Interface-Streamlit_Premium-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io)
-[![PostgreSQL](https://img.shields.io/badge/Enterprise-PostgreSQL_Ready-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
-[![Security](https://img.shields.io/badge/Security-AES_Layer_2-00ffab?style=for-the-badge)](https://github.com/Daniel-pk)
+## At a glance
 
-<br/>
+| | |
+|---|---|
+| **Does** | Schema discovery → a guarded, row-capped SELECT → a plain-language answer; per-session history; a chart from the fetched rows; thumbs-up/down feedback logged with the SQL that produced the answer |
+| **Cannot** | Write. SQLite is opened `mode=ro`; Postgres sessions are `default_transaction_read_only=on`; a backend without a read-only mode is refused. CI runs a `DELETE` through the agent's engine and requires the database to refuse it |
+| **Model** | Any OpenAI-compatible endpoint (`LLM_BASE_URL`, `LLM_MODEL`); DeepSeek by default because that is what the code was written against |
+| **Tests** | 94 — none reach a network or need a key; the page is driven headlessly with Streamlit's `AppTest` |
+| **CI** | lint · tests on 3.11/3.12 · the write-refusal check · bandit (fails the job) · gitleaks · container built, non-root, health-checked |
+| **Not measured** | Answer accuracy. Every number on the page is labelled as the result of a query the agent ran; nothing here scores whether the query was the right one |
 
-**Daniel SQL AI** is a premium, autonomous Data Analyst designed to bridge the gap between complex databases and executive decision-making. No SQL, no bottlenecks—just raw intelligence delivered through a stunning, glassmorphic interface.
-
-[**Exploration Hub**](#-core-capabilities) • [**Architecture**](#-deep-engine-logic) • [**Deployment**](#-lightning-setup) • [**Roadmap**](#-the-vision)
-
----
-
-</div>
-
-## 🚀 The Reality of Modern Data
-
-Data is growing, but the ability to *query* it remains a bottleneck. Technical debt and "ticket-queues" for simple analytics are costing enterprises thousands of hours.
-
-*   **The Problem**: 90% of business stakeholders can't query their own data.
-*   **The Wait**: Data analysts are overwhelmed with repetitive CRUD-style requests.
-*   **The Risk**: Raw SQL execution without guardrails is a liability.
-
-**Daniel SQL AI solves this by introducing an Agentic Reasoning Layer.**
-
----
-
-## ✨ Core Capabilities
-
-### 🧠 Autonomous Semantic Reasoning
-Powered by **DeepSeek-V3**, our engine doesn't just "generate" SQL—it *understands* your schema.
-*   **Schema Pruning**: Dynamically inspects tables and columns before planning.
-*   **Multi-Step ReAct Loop**: If a query fails, the agent self-corrects and iterates until the data is found.
-*   **Business Translation**: Every result comes with a "Neural Logic" summary explaining the 'Why' behind the numbers.
-
-### 📈 Predictive Visualization Engine
-Stop staring at tables. Daniel SQL AI detects the shape of your data and selects the optimal visual representation instantly.
-*   **Timeline Analysis**: Automatic spline-charts for time-series data.
-*   **Categorical Depth**: Bar and Donut charts for departmental breakdowns.
-*   **Interactive Overlays**: Plotly-powered dark mode charts designed for executive presentations.
-
-### 🛡️ Layered Security Protocol
-Enterprise safety is baked into the core.
-*   **Layer 1 (Pre-Audit)**: Prevents malicious input before it ever reaches the LLM.
-*   **Layer 2 (Safe Execution)**: Read-only enforcement with `SELECT`-only privileges and automatic `LIMIT 100` injection.
-*   **Complexity Scoring**: Real-time analysis of query performance risks (JOIN/Subquery counting).
-
----
-
-## 🛠️ Deep Engine Logic
-
-### The "Nexus" Architecture
-Daniel SQL AI operates on a state-of-the-art **ReAct (Reason + Action) framework**:
+## Architecture
 
 ```mermaid
-graph TD
-    A[Natural Language Query] --> B{Pre-Audit Security}
-    B -->|Passed| C[Daniel Agent]
-    C --> D[Schema Inspection]
-    D --> E[SQL Planning]
-    E --> F[SafeSQLExecutor]
-    F --> G[Data Frame Result]
-    G --> H[ResultVisualizer]
-    H --> I[Analytics Dashboard]
-    F -->|Error| E
+flowchart LR
+    Q[question] --> A{agent loop<br/>≤ 8 tool calls}
+    A -->|list_tables| S[(schema)]
+    A -->|describe_table| S
+    A -->|run_query| G{sql_guard<br/>parse · one SELECT · no write nodes}
+    G -->|refused| A
+    G -->|allowed + row cap| E[(read-only engine<br/>mode=ro / read_only=on)]
+    E -->|rows as data| A
+    A --> ANS[answer + SQL + rows + steps]
+    ANS --> P[Streamlit page<br/>session history · chart · feedback]
+    classDef guard fill:#f59e0b,color:#111,stroke:#b45309
+    classDef ro fill:#065f46,color:#ecfdf5,stroke:#047857
+    class G guard
+    class E ro
 ```
 
-### Technical Blueprint
-| Module | Technology | Function |
-| :--- | :--- | :--- |
-| **LLM Core** | `DeepSeek-V3` | High-fidelity SQL reasoning & Code generation |
-| **Orchestration** | `LangChain` | Autonomous agentic workflow management |
-| **Frontend** | `Streamlit` | Custom-themed Glassmorphism UI |
-| **Visuals** | `Plotly Express` | Executive-grade interactive charting |
-| **Persistence** | `SQLAlchemy` | Universal DB adapter (PostgreSQL / SQLite) |
+### One question
 
----
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Page (session)
+    participant AG as SQLAgent
+    participant M as Model
+    participant T as Tools
+    participant DB as Read-only engine
 
-## 🌩️ Lightning Setup
+    U->>AG: ask(question, this session's history)
+    AG->>M: system prompt + history + question, bound to 3 tools
+    M-->>AG: tool call: describe_table("orders")
+    AG->>T: describe_table
+    T->>DB: SELECT * FROM orders LIMIT 3
+    AG->>M: columns, types, sample rows
+    M-->>AG: tool call: run_query("SELECT ...")
+    AG->>T: run_query
+    T->>T: sql_guard.check → one SELECT, no write nodes
+    T->>T: with_row_limit → LIMIT on the outermost query
+    T->>DB: execute
+    DB-->>T: rows (capped)
+    AG->>M: rows rendered as text
+    M-->>AG: final answer (no tool call)
+    AG-->>U: Answer(text, sql, rows, steps)
+```
 
-### 1. Initialize Environment
+## Quick start
+
 ```bash
-git clone https://github.com/Daniel-pk/Daniel-SQL-AI.git
-cd Daniel-SQL-AI
-python -m venv venv
-source venv/bin/activate  # Or venv\Scripts\Activate
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-### 2. Configure Credentials
-Create a `.env` file with your API key:
-```env
-DEEPSEEK_API_KEY=your_key_here
-# Optional: DATABASE_TYPE=postgresql
-```
-
-### 3. Launch the Intelligence Hub
-```bash
+cp .env.example .env                              # set LLM_API_KEY
 streamlit run app.py
 ```
 
----
+With the default `DATABASE_URL=sqlite:///ecommerce.db` a deterministic sample
+database (40 customers, 12 products, 250 orders, seed 42) is created on first
+start. Point `DATABASE_URL` at your own SQLite file or Postgres database; it
+is opened read-only either way.
 
-## 🗺️ The Vision
+### Container
 
-- [x] **v1.0**: Core ReAct Engine + Visualizer + Security Layer.
-- [ ] **v1.5**: Multi-Agent Orchestration (Specialized Charting Agents).
-- [ ] **v2.0**: Vector-Search for Large-Scale Schema Pruning (1000+ Tables).
-- [ ] **v2.5**: One-Click PDF Executive Report Generation.
+```bash
+docker build -t sql-agent .
+docker run --rm -p 8501:8501 --env-file .env -v sqlagent-data:/app/data sql-agent
+```
 
----
+## Configuration
 
-## 🤝 Join the Movement
+| Variable | Default | Notes |
+|---|---|---|
+| `LLM_API_KEY` | — | Required to ask anything. `DEEPSEEK_API_KEY` is accepted as an alias |
+| `LLM_BASE_URL` · `LLM_MODEL` | `https://api.deepseek.com/v1` · `deepseek-chat` | Any OpenAI-compatible endpoint |
+| `DATABASE_URL` | `sqlite:///ecommerce.db` | Opened read-only. Postgres via `postgresql://…` |
+| `MAX_ROWS` | `100` | Applied on the outermost query; the page says when a result was capped |
+| `HISTORY_TURNS` | `3` | Prior turns shown to the model, from this session only |
+| `FEEDBACK_PATH` | `evaluations.csv` | Thumbs-up/down log with question, SQL, answer. Empty disables it |
 
-Daniel SQL AI is built for everyone who believes data should be a conversation, not a chore.
+## What changed, and why
 
-*   **Star the Repo** if this changes your workflow.
-*   **Open an Issue** for feature requests.
-*   **Contribute** to the security or visualization layers.
+Every defect below was reproduced on the original code before it was fixed.
 
-<br/>
+| # | Defect | Effect |
+|--:|---|---|
+| 1 | The connection was read-write and the only guard was a prompt sentence | `DELETE FROM customers` through the agent's connection left zero rows |
+| 2 | `SafeSQLExecutor` was imported and never used | The advertised safety layer did not run |
+| 3 | Its substring check refused any column containing a keyword | `SELECT created_at FROM t` was "unsafe" |
+| 4 | Its limit logic looked for the word LIMIT anywhere | A LIMIT in a subquery left the outer query unbounded |
+| 5 | A question-level keyword filter | Refused "which products were **updated**?"; admitted "remove every row from orders" |
+| 6 | The agent was a server-wide singleton holding `self.history` | Every user of the server shared one conversation |
+| 7 | Feedback buttons rendered inside `if run_query:` | A click reruns the script without that block; they could never log anything |
+| 8 | Feedback logged the SQL as `"N/A"` | The one thing worth recording was not |
+| 9 | Sidebar: "DeepSeek-V3: Online", "Security: Row-Level Active", "Schema Cache: Active" | Static text; nothing checked the model, no row-level security existed, no cache existed |
+| 10 | The page re-ran the model's SQL through a second, unguarded, read-write engine | To draw the chart |
+| 11 | `test_agent.py` wrapped everything in `try/except: print` | Passed with no API key at all |
+| 12 | `auto_visualize` renamed the caller's DataFrame columns in place | The data tab and the chart disagreed on column names |
 
-<div align="center">
+<details>
+<summary>Also</summary>
 
-Built with ❤️ by [Daniel](https://github.com/daniellopez882/)
+No version constraints; five packages listed that nothing imported; the model, base URL and `top_p` hardcoded (`model_kwargs={"top_p": …}` is refused by recent `langchain-openai`); the legacy `create_sql_agent` / AgentExecutor path with no step bound; unseeded sample data (a different demo on every run); emoji printed to stdout by the setup script; a bare `except:`; user questions written to the feedback CSV unescaped (spreadsheet formula injection); a README asserting that "90% of business stakeholders can't query their own data".
 
-**Transforming raw data into actionable intelligence.**
+</details>
 
-</div>
+## Design notes
+
+| Record | Decision |
+|---|---|
+| [ADR 0001](docs/adr/0001-read-only-is-a-property-of-the-connection.md) | Read-only is a property of the connection; the guard is a parser |
+| [ADR 0002](docs/adr/0002-the-agent-owns-its-tools.md) | The agent owns its tools; the loop is small and bounded |
+| [ADR 0003](docs/adr/0003-session-state-not-singleton-state.md) | Conversation and results live in session state; status is measured |
+| [Threat model](docs/threat-model.md) | Assets, six threats, what is not addressed |
+
+## Layout
+
+```
+app.py           the Streamlit page
+agent.py         the tool-calling loop; Answer / Step
+tools.py         list_tables, describe_table, run_query → QueryResult
+sql_guard.py     parse; one SELECT; no write nodes; outermost LIMIT
+db.py            read-only engines for SQLite and Postgres
+llm.py           the one place a model is built; the test seam
+config.py        settings
+setup_db.py      deterministic sample database
+visualizer.py    chart picker (works on a copy)
+tests/           94 tests
+docs/            ADRs, threat model
+```
+
+## Limits
+
+- No authentication on the page: whoever reaches the port can ask the
+  database whatever the read-only user can read. Put it behind a proxy and
+  grant that user the minimum.
+- One provider style (OpenAI-compatible). No rate limit or per-user quota.
+- Nothing here has been run against a model or a real database; the tests
+  use a scripted model and the sample SQLite file.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
