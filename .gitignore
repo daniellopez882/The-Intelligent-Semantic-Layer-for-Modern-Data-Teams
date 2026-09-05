@@ -48,3 +48,10 @@ Thumbs.db
 
 # Project Specific
 evaluations.csv
+
+# Tooling
+.venv312/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

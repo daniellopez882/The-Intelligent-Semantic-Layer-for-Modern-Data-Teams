@@ -1,13 +1,16 @@
-langchain
-langchain-anthropic
-langchain-openai
-openai
-langchain-community
-sqlalchemy
-pandas
-plotly
-streamlit
-python-dotenv
-duckdb
-pydantic
-psycopg2-binary
+# Pinned to the versions this repository is tested against.
+#
+# The previous file listed thirteen bare package names, five of which nothing
+# imported (langchain, langchain-community, langchain-anthropic, duckdb, openai).
+
+SQLAlchemy==2.0.52
+langchain-core==1.6.2
+langchain-openai==1.6.0
+pandas==3.0.5
+plotly==7.0.0
+psycopg2-binary==2.9.12
+pydantic-settings==2.15.0
+pydantic==2.13.5
+python-dotenv==1.2.3
+sqlglot==30.18.0
+streamlit==1.63.0

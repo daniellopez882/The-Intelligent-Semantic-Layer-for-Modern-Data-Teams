@@ -1,0 +1,25 @@
+[project]
+name = "sql-agent"
+version = "0.2.0"
+description = "A Streamlit agent that answers questions about a database with read-only SQL."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning:agent", "error::DeprecationWarning:tools"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [".venv", ".venv312"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "C4", "SIM", "RUF"]
+ignore = ["S101", "S608"]  # asserts in tests; S608 flags the sample-row query whose identifier is quoted by the dialect
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "app", "config", "db", "llm", "setup_db", "sql_guard", "tools", "visualizer"]
