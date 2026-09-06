@@ -87,7 +87,9 @@ class SQLTools:
         cols = inspector.get_columns(table)
         lines = [f"{c['name']} {c['type']}" for c in cols]
         quoted = self.engine.dialect.identifier_preparer.quote(table)
-        sample = self.run_query(f"SELECT * FROM {quoted} LIMIT {MAX_SAMPLE_ROWS}")
+        # nosec B608 - `quoted` is a table name taken from the inspector and quoted by
+        # the dialect two lines above, and MAX_SAMPLE_ROWS is a module constant.
+        sample = self.run_query(f"SELECT * FROM {quoted} LIMIT {MAX_SAMPLE_ROWS}")  # nosec B608
         self.last_result = None  # a sample is not an answer
         return f"Table {table}:\n" + "\n".join(lines) + "\n\nSample rows:\n" + sample.as_text()
 
