@@ -1,109 +1,187 @@
-import os
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_community.utilities import SQLDatabase
-from langchain_community.agent_toolkits import create_sql_agent, SQLDatabaseToolkit
-from langchain_core.prompts import ChatPromptTemplate
-from tools import SafeSQLExecutor
+"""
+The SQL agent: a bounded tool-calling loop.
 
-load_dotenv()
+The previous agent was ``create_sql_agent(..., agent_type="zero-shot-react-description")``
+from ``langchain_community`` -- the legacy AgentExecutor path, with the stock
+toolkit's read-write query tool, an unbounded step count, and a question-level
+keyword filter (``"delete" in question.lower()``) as its only guard. The
+filter refused "which products were updated last month?" and admitted
+"remove every row from orders".
 
-CUSTOM_SYSTEM_PROMPT = """You are Daniel, an advanced expert SQL data analyst.
-Your goal is to provide deep insights from the database using natural language and precise SQL.
-
-CRITICAL GUIDELINES:
-1. SCHEMA AWARENESS: Always inspect the schema before writing queries. Use exact table and column names.
-2. JOIN LOGIC: Prefer explicit JOINs. Ensure you connect foreign keys correctly (e.g., orders.product_id = products.product_id).
-3. ANALYTICAL DEPTH: When asked for "top" or "trends", use ORDER BY and appropriate date groupings.
-4. SAFETY: Never generate any queries that modify data (UPDATE, DELETE, DROP, etc.). Only SELECT is allowed.
-5. EXPLANATION: After providing results, briefly explain the business significance of the data.
-6. CLARITY: If a question is ambiguous, choose the most logical business interpretation but state your assumption.
-
-TONE: Professional, insightful, and data-driven.
+This loop owns its tools. The model sees three: ``list_tables``,
+``describe_table`` and ``run_query``; the last one runs only what
+``sql_guard`` admits, on a read-only connection, and its result is kept as
+data so the page never re-executes the statement.
 """
 
-class SQLQueryAgent:
-    """Enterprise SQL Agent powered by DeepSeek and specialized reasoning"""
-    
-    def __init__(self, database_uri: str, api_key: str = None):
-        if not api_key:
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-            
-        if not api_key:
-            raise ValueError("DeepSeek API key is required. Set DEEPSEEK_API_KEY env var.")
+from __future__ import annotations
 
-        self.db = SQLDatabase.from_uri(
-            database_uri,
-            sample_rows_in_table_info=3
-        )
-        
-        # DeepSeek V3 - Highly capable for code/SQL
-        self.llm = ChatOpenAI(
-            model="deepseek-chat", 
-            openai_api_key=api_key,
-            openai_api_base="https://api.deepseek.com/v1",
-            temperature=0,
-            model_kwargs={"top_p": 0.1}
-        )
-        
-        self.toolkit = SQLDatabaseToolkit(
-            db=self.db,
-            llm=self.llm
-        )
-        
-        # Local history for conversational context
-        self.history = []
+import json
+import logging
+from dataclasses import dataclass, field
+from typing import Any
 
-        # Setup the agent with standard reasoning loop
-        self.agent = create_sql_agent(
-            llm=self.llm,
-            toolkit=self.toolkit,
-            agent_type="zero-shot-react-description",
-            verbose=True,
-            handle_parsing_errors=True
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+from config import settings
+from db import read_only_engine
+from llm import get_chat_model
+from tools import QueryResult, SQLTools
+
+logger = logging.getLogger("sql_agent.agent")
+
+SYSTEM_PROMPT = """You are a careful SQL data analyst.
+
+You have three tools. Use list_tables and describe_table before writing a query
+against a table you have not seen. Then use run_query with exactly one SELECT
+statement. You cannot modify data; the connection is read-only and non-SELECT
+statements are refused.
+
+When you have the answer, reply in plain language: what the numbers say and,
+in one sentence, what you assumed if the question was ambiguous. Do not invent
+figures; only report what run_query returned."""
+
+TOOL_SPECS = [
+    {
+        "name": "list_tables",
+        "description": "List the tables in the database.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "describe_table",
+        "description": "Columns, types and sample rows for one table.",
+        "parameters": {
+            "type": "object",
+            "properties": {"table": {"type": "string", "description": "table name"}},
+            "required": ["table"],
+        },
+    },
+    {
+        "name": "run_query",
+        "description": "Run one read-only SELECT statement and return its rows.",
+        "parameters": {
+            "type": "object",
+            "properties": {"sql": {"type": "string", "description": "a single SELECT statement"}},
+            "required": ["sql"],
+        },
+    },
+]
+
+
+@dataclass
+class Step:
+    tool: str
+    args: dict[str, Any]
+    observation: str
+
+
+@dataclass
+class Answer:
+    text: str
+    sql: str | None = None
+    result: QueryResult | None = None
+    steps: list[Step] = field(default_factory=list)
+    stopped_early: bool = False
+
+
+class SQLAgent:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        model: Any = None,
+        max_steps: int = 8,
+        max_rows: int | None = None,
+    ) -> None:
+        url = database_url or settings.DATABASE_URL
+        self.engine = read_only_engine(url)
+        self.tools = SQLTools(self.engine, max_rows=max_rows or settings.MAX_ROWS)
+        self._model = model
+        self.max_steps = max_steps
+
+    @property
+    def model(self) -> Any:
+        if self._model is None:
+            self._model = get_chat_model()
+        return self._model
+
+    # -- schema helpers for the page ----------------------------------------
+
+    def table_names(self) -> list[str]:
+        return [t.strip() for t in self.tools.list_tables().split(",") if t.strip() and t != "(no tables)"]
+
+    # -- the loop -------------------------------------------------------------
+
+    def ask(self, question: str, history: list[tuple[str, str]] | None = None) -> Answer:
+        """
+        Answer ``question`` using the tools, with the last few turns as context.
+
+        ``history`` belongs to the caller's session. The previous agent kept
+        it on the object -- which the page cached as a singleton, so every
+        user of the server shared one conversation.
+        """
+        question = (question or "").strip()
+        if not question:
+            return Answer(text="Ask a question about the data.")
+
+        messages: list[Any] = [SystemMessage(content=SYSTEM_PROMPT)]
+        for past_q, past_a in (history or [])[-settings.HISTORY_TURNS :]:
+            messages.append(HumanMessage(content=past_q))
+            messages.append(AIMessage(content=past_a))
+        messages.append(HumanMessage(content=question))
+
+        bound = self.model.bind_tools(TOOL_SPECS)
+        self.tools.last_result = None
+        steps: list[Step] = []
+        last_query: QueryResult | None = None
+
+        for _ in range(self.max_steps):
+            reply = bound.invoke(messages)
+            calls = getattr(reply, "tool_calls", None) or []
+            if not calls:
+                return Answer(
+                    text=_text(reply),
+                    sql=last_query.sql if last_query and last_query.ok else None,
+                    result=last_query if last_query and last_query.ok else None,
+                    steps=steps,
+                )
+            messages.append(reply)
+            for call in calls:
+                observation = self._dispatch(call["name"], call.get("args") or {})
+                steps.append(Step(call["name"], call.get("args") or {}, observation))
+                if call["name"] == "run_query" and self.tools.last_result is not None:
+                    last_query = self.tools.last_result
+                messages.append(ToolMessage(content=observation, tool_call_id=call.get("id") or call["name"]))
+
+        logger.warning("agent stopped after %d steps without a final answer", self.max_steps)
+        return Answer(
+            text=f"I stopped after {self.max_steps} tool calls without reaching an answer. "
+            "Try a narrower question.",
+            sql=last_query.sql if last_query and last_query.ok else None,
+            result=last_query if last_query and last_query.ok else None,
+            steps=steps,
+            stopped_early=True,
         )
-    
-    def query(self, question: str) -> dict:
-        """Process a natural language question with conversation memory"""
+
+    def _dispatch(self, name: str, args: dict[str, Any]) -> str:
         try:
-            # Pre-audit safety check
-            if self._is_potentially_malicious(question):
-                return {
-                    "success": False,
-                    "error": "Query contains forbidden keywords (DELETE, DROP, etc.). Access Denied."
-                }
+            if name == "list_tables":
+                return self.tools.list_tables()
+            if name == "describe_table":
+                return self.tools.describe_table(str(args.get("table", "")))
+            if name == "run_query":
+                return self.tools.run_query(str(args.get("sql", ""))).as_text()
+        except Exception as error:  # the model must see a message, not a traceback
+            logger.exception("tool %s failed", name)
+            return f"ERROR: {type(error).__name__} while running {name}"
+        return f"ERROR: unknown tool {name!r}; available: list_tables, describe_table, run_query"
 
-            # Prepare context-aware prompt
-            full_input = question
-            if self.history:
-                history_text = "\n".join([f"Q: {h['q']}\nA: {h['a']}" for h in self.history[-3:]])
-                full_input = f"Recent History:\n{history_text}\n\nCurrent Question: {question}"
 
-            # Execute reasoning chain
-            result = self.agent.invoke({
-                "input": full_input
-            })
-
-            # Update history
-            self.history.append({"q": question, "a": result["output"]})
-            if len(self.history) > 5:
-                self.history.pop(0)
-            
-            return {
-                "success": True,
-                "answer": result["output"],
-                "steps": result.get("intermediate_steps", [])
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Intelligence Parse Failure: {str(e)}"
-            }
-
-    def _is_potentially_malicious(self, question: str) -> bool:
-        forbidden = ["delete", "drop", "truncate", "update", "insert", "alter", "grant", "revoke"]
-        return any(f in question.lower() for f in forbidden)
-
-    def get_schema(self) -> str:
-        """Fetch the technical map of the knowledge base"""
-        return self.db.get_table_info()
+def _text(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text", "") if isinstance(b, dict) else str(b) for b in content]
+        return "".join(parts)
+    return json.dumps(content) if not isinstance(content, str) else content
