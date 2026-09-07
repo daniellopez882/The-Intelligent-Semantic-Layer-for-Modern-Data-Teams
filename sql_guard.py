@@ -20,6 +20,12 @@ of two controls; the other is that the connection itself is read-only
 (``db.py``). A guard that can be argued past is a speed bump, not a lock,
 which is why the connection is the real control and this is the one that
 produces a useful message.
+
+The tree walk answers two questions, not one. "Does this statement write?" is
+what the read-only connection also answers. "Does this statement do something
+a read-only connection would happily allow?" is the second, and it is the one
+neither control used to ask: ``SELECT pg_read_file('/etc/passwd')`` writes
+nothing, so both controls admitted it. ``DENIED_FUNCTIONS`` closes that.
 """
 
 from __future__ import annotations
@@ -46,6 +52,76 @@ WRITE_NODES = (
 )
 
 
+# A statement can be a pure read and still be an attack. These functions read
+# the filesystem, open a connection, load code, or hold the server; none of
+# them writes, so neither the READ_ROOTS check below nor a read-only connection
+# refuses them. Probed against the guard before this list existed:
+# `SELECT pg_read_file('/etc/passwd')`, `SELECT pg_ls_dir('/')`,
+# `SELECT lo_import('/etc/passwd')`, `SELECT * FROM dblink('host=evil', ...)`,
+# `SELECT pg_sleep(60)`, `SELECT load_extension('evil.so')` and
+# `SELECT readfile('/etc/passwd')` were all returned as "read-only".
+FILESYSTEM = "reads or writes files on the database server"
+NETWORK = "opens a network connection from the database server"
+CODE = "loads code into the database server"
+RESOURCE = "holds server resources or changes server state"
+
+DENIED_FUNCTIONS: dict[str, str] = {
+    # PostgreSQL -- server-side file access
+    "pg_read_file": FILESYSTEM,
+    "pg_read_binary_file": FILESYSTEM,
+    "pg_stat_file": FILESYSTEM,
+    "pg_ls_dir": FILESYSTEM,
+    "pg_ls_logdir": FILESYSTEM,
+    "pg_ls_waldir": FILESYSTEM,
+    "pg_ls_tmpdir": FILESYSTEM,
+    "pg_ls_archive_statusdir": FILESYSTEM,
+    "lo_import": FILESYSTEM,
+    "lo_export": FILESYSTEM,
+    # PostgreSQL -- outbound connections
+    "dblink": NETWORK,
+    "dblink_connect": NETWORK,
+    "dblink_connect_u": NETWORK,
+    "dblink_exec": NETWORK,
+    "dblink_send_query": NETWORK,
+    # PostgreSQL -- server state and resource exhaustion, none of which a
+    # read-only transaction prevents
+    "pg_sleep": RESOURCE,
+    "pg_sleep_for": RESOURCE,
+    "pg_sleep_until": RESOURCE,
+    "pg_terminate_backend": RESOURCE,
+    "pg_cancel_backend": RESOURCE,
+    "pg_reload_conf": RESOURCE,
+    "pg_rotate_logfile": RESOURCE,
+    "pg_switch_wal": RESOURCE,
+    "pg_advisory_lock": RESOURCE,
+    "pg_advisory_xact_lock": RESOURCE,
+    "set_config": RESOURCE,
+    # SQLite
+    "load_extension": CODE,
+    "readfile": FILESYSTEM,
+    "writefile": FILESYSTEM,
+    "edit": FILESYSTEM,
+    "fts3_tokenizer": CODE,
+    # MySQL / MariaDB
+    "load_file": FILESYSTEM,
+    "sys_exec": CODE,
+    "sys_eval": CODE,
+    "benchmark": RESOURCE,
+    "sleep": RESOURCE,
+}
+
+
+def _function_name(node: exp.Expression) -> str | None:
+    """The called function's name, for both known and unparsed functions."""
+    if not isinstance(node, exp.Func):
+        return None
+    # sqlglot gives a typed node for the functions it knows (Count, Lower, ...)
+    # and an Anonymous node carrying the raw name for everything else, which is
+    # where every function in the denylist lands.
+    name = node.name if isinstance(node, exp.Anonymous) else node.sql_name()
+    return name.lower() if name else None
+
+
 @dataclass(frozen=True)
 class Verdict:
     allowed: bool
@@ -66,7 +142,11 @@ def check(sql: str, dialect: str | None = None) -> Verdict:
 
     try:
         statements = sqlglot.parse(text, read=dialect)
-    except sqlglot.errors.ParseError as error:
+    except sqlglot.errors.SqlglotError as error:
+        # SqlglotError covers ParseError *and* TokenError. Catching only the
+        # former, as this did, let an unterminated quote -- `'` on its own --
+        # escape as an exception instead of a refusal. Found by the property
+        # test that feeds the guard arbitrary text.
         return Verdict(False, f"could not parse: {str(error).splitlines()[0][:200]}")
 
     statements = [s for s in statements if s is not None]
@@ -82,6 +162,9 @@ def check(sql: str, dialect: str | None = None) -> Verdict:
     for node in root.walk():
         if isinstance(node, WRITE_NODES):
             return Verdict(False, f"{type(node).__name__} is not permitted inside a query")
+        name = _function_name(node)
+        if name is not None and name in DENIED_FUNCTIONS:
+            return Verdict(False, f"{name}() is not permitted: it {DENIED_FUNCTIONS[name]}")
 
     return Verdict(True, "read-only", root.sql(dialect=dialect))
 

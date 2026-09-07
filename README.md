@@ -16,7 +16,7 @@ shows the answer, the rows, a chart and every step the agent took.
 | **Does** | Schema discovery → a guarded, row-capped SELECT → a plain-language answer; per-session history; a chart from the fetched rows; thumbs-up/down feedback logged with the SQL that produced the answer |
 | **Cannot** | Write. SQLite is opened `mode=ro`; Postgres sessions are `default_transaction_read_only=on`; a backend without a read-only mode is refused. CI runs a `DELETE` through the agent's engine and requires the database to refuse it |
 | **Model** | Any OpenAI-compatible endpoint (`LLM_BASE_URL`, `LLM_MODEL`); DeepSeek by default because that is what the code was written against |
-| **Tests** | 94 — none reach a network or need a key; the page is driven headlessly with Streamlit's `AppTest` |
+| **Tests** | 208 — none reach a network or need a key; the page is driven headlessly with Streamlit's `AppTest`. 69 adversarial SQL payloads are asserted refused, and Hypothesis property tests generate writes, stacked statements and denied calls in every position |
 | **CI** | lint · tests on 3.11/3.12 · the write-refusal check · bandit (fails the job) · gitleaks · container built, non-root, health-checked |
 | **Not measured** | Answer accuracy. Every number on the page is labelled as the result of a query the agent ran; nothing here scores whether the query was the right one |
 
@@ -117,6 +117,8 @@ Every defect below was reproduced on the original code before it was fixed.
 | 10 | The page re-ran the model's SQL through a second, unguarded, read-write engine | To draw the chart |
 | 11 | `test_agent.py` wrapped everything in `try/except: print` | Passed with no API key at all |
 | 12 | `auto_visualize` renamed the caller's DataFrame columns in place | The data tab and the chart disagreed on column names |
+| 13 | The guard admitted any statement that only *reads* — `SELECT pg_read_file('/etc/passwd')`, `lo_import(...)`, `dblink('host=...')`, `pg_sleep(600)`, `load_extension(...)` and `readfile(...)` all came back `read-only`, and the read-only connection executes every one of them, because none writes | Server-side file reads, outbound connections, code loading and denial of service through a "read-only" agent. A function denylist by category (filesystem, network, code, resources) closes it; the 69-payload corpus and the property tests keep it closed wherever the call is nested |
+| 14 | `check()` caught `ParseError` but not `TokenError` | A lone `'` in a question raised out of the tool as a 500 instead of a refusal. Found by the property test that feeds the guard arbitrary text; `SqlglotError` covers both now |
 
 <details>
 <summary>Also</summary>
